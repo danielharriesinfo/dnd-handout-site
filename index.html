@@ -77,6 +77,7 @@
   <script src="https://unpkg.com/@rive-app/webgl2@2.43.1"></script>
   <script>
     const RIV = "dnd-quill.riv";
+    const RIV_BYTES = 10248711; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
     const STATE_MACHINE = "State Machine 1";
     const DOWNLOAD_SHARE = 0.6; // of the bar: downloading the file, then the stage warming up
 
@@ -118,24 +119,25 @@
       else if (dpr.good >= 4 && dpr.index + 1 < dpr.levels.length && !(dpr.slowUntil[dpr.index + 1] > now)) { dpr.index++; dpr.good = dpr.bad = 0; resize(r); }
     }
 
-    // Downloads the file with progress (the first part of the bar).
+    // Downloads the file with progress (the first part of the bar). The bytes
+    // arrive decompressed, so a compressed Content-Length can't size the bar:
+    // the file's own size (RIV_BYTES) does.
     async function download(url) {
       const res = await fetch(url);
       if (!res.ok) throw new Error("HTTP " + res.status);
-      const total = +res.headers.get("Content-Length") || 0;
+      const total = RIV_BYTES || +res.headers.get("Content-Length") || 0;
       if (!res.body || !total) return res.arrayBuffer();
       const reader = res.body.getReader();
-      const data = new Uint8Array(total);
+      const chunks = [];
       let got = 0;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (got + value.length > data.length) return new Blob([data.subarray(0, got), value]).arrayBuffer(); // size was off
-        data.set(value, got);
+        chunks.push(value);
         got += value.length;
-        setProgress((got / total) * DOWNLOAD_SHARE);
+        setProgress(Math.min(got / total, 1) * DOWNLOAD_SHARE);
       }
-      return data.buffer.slice(0, got);
+      return new Blob(chunks).arrayBuffer();
     }
 
     async function start() {
