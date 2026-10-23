@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>D&amp;D Handout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Aldrich&display=swap" rel="stylesheet" />
+<style>
+  /* The public page: the stage (MainStage, 1920 x 1200) as large as fits,
+     an HTML loading screen over it while the file downloads and the stage
+     warms up, and the letter's text box over the Compose panel. Made to sit
+     in an iframe (Wix's "Embed a site") as well as on its own. */
+  :root { --bg: #0d0b0a; --gold: #f2c46e; --label: #d9c7a3; --track: #1e2229; --rim: #8a6a3a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  body { display: grid; place-items: center; }
+
+  #stage { position: relative; width: min(100vw, 160vh); aspect-ratio: 1920 / 1200;
+           container-type: inline-size; }
+  #canvas { display: block; width: 100%; height: 100%; }
+
+  /* Compose's writing panel: artboard x 85-514, y 318-605, the box inset 12 */
+  #letterInput {
+    position: absolute; display: none; box-sizing: border-box; resize: none;
+    left: calc(97 / 1920 * 100%); top: calc(330 / 1200 * 100%);
+    width: calc(405 / 1920 * 100%); height: calc(263 / 1200 * 100%);
+    padding: 0.6cqw; border: 0; outline: 0; background: transparent;
+    color: #e9dfc9; caret-color: var(--gold);
+    font: 1.05cqw/1.45 "Aldrich", system-ui, sans-serif; letter-spacing: 0.04em;
+  }
+  #letterInput::placeholder { color: #8d8270; }
+
+  /* The loading screen: the same look as the one in the file (which sits
+     under this and fades with it), with motion the browser keeps running
+     while the stage stalls: a flickering glow and a shimmer on the bar. */
+  #loader { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+            background: var(--bg); transition: opacity 0.7s cubic-bezier(0.4, 0, 0.2, 1); }
+  #loader.done { opacity: 0; pointer-events: none; }
+  #loader .glow { position: absolute; width: 58vmax; height: 34vmax; border-radius: 50%;
+                  background: radial-gradient(closest-side, #3a2414 0%, #2a1a0e 45%, transparent 100%);
+                  animation: flicker 3.2s ease-in-out infinite; will-change: opacity, transform; }
+  #loader .box { position: relative; display: grid; justify-items: center; gap: 22px; }
+  #loader .label { font: 20px "Aldrich", system-ui, sans-serif; letter-spacing: 6px; color: var(--label);
+                   animation: breathe 2.4s ease-in-out infinite; }
+  #loader .track { position: relative; width: 496px; max-width: 70vw; height: 16px; box-sizing: border-box;
+                   border: 1.5px solid var(--rim); border-radius: 8px; background: var(--track); overflow: hidden; }
+  #loader .fill { position: absolute; left: 6px; right: 6px; top: 50%; height: 6px; margin-top: -3px;
+                  border-radius: 3px; background: var(--gold); box-shadow: 0 0 10px #f0b45a99;
+                  transform-origin: left center; transform: scaleX(0); transition: transform 0.35s ease-out; }
+  #loader .shine { position: absolute; inset: 0; background: linear-gradient(90deg, transparent, #fff3d455, transparent);
+                   width: 30%; animation: shine 1.8s ease-in-out infinite; will-change: transform; }
+  #loader .note { font: 13px "Aldrich", system-ui, sans-serif; letter-spacing: 2px; color: #8d8270;
+                  max-width: 70vw; text-align: center; min-height: 1em; }
+  @keyframes flicker { 0%, 100% { opacity: 1; transform: scale(1); } 30% { opacity: 0.86; transform: scale(0.985); }
+                       55% { opacity: 0.95; transform: scale(1.01); } 75% { opacity: 0.88; transform: scale(0.995); } }
+  @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+  @keyframes shine { from { transform: translateX(-110%); } to { transform: translateX(370%); } }
+  @media (prefers-reduced-motion: reduce) { #loader .glow, #loader .label, #loader .shine { animation: none; } }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="canvas"></canvas>
+    <textarea id="letterInput" placeholder="Write your letter…" aria-label="Your letter"></textarea>
+  </div>
+
+  <div id="loader" role="status" aria-live="polite">
+    <div class="glow"></div>
+    <div class="box">
+      <div class="label">PREPARING YOUR DESK</div>
+      <div class="track"><div class="fill"></div><div class="shine"></div></div>
+      <div class="note"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/@rive-app/webgl2@2.43.1"></script>
+  <script>
+    const RIV = "dnd-quill.riv";
+    const STATE_MACHINE = "State Machine 1";
+    const DOWNLOAD_SHARE = 0.6; // of the bar: downloading the file, then the stage warming up
+
+    const canvas = document.getElementById("canvas");
+    const letterInput = document.getElementById("letterInput");
+    const loader = document.getElementById("loader");
+    const fill = loader.querySelector(".fill");
+    const note = loader.querySelector(".note");
+
+    let shown = 0;
+    function setProgress(p) {
+      shown = Math.max(shown, Math.min(1, p));
+      fill.style.transform = `scaleX(${shown})`;
+    }
+    function fail(message) {
+      loader.querySelector(".shine").style.display = "none";
+      note.textContent = message;
+    }
+
+    // Canvas resolution: starts at 1 pixel per CSS pixel and steps towards the
+    // screen's density (max 2) while frames keep up, back down when they don't,
+    // so a fast GPU gets a sharp picture and an integrated one stays smooth.
+    const dpr = { levels: [0.75, 1, 1.25, 1.5, 1.75, 2].filter((l) => l <= Math.max(1, Math.min(devicePixelRatio || 1, 2)) + 0.01),
+                  index: 1, frames: 0, since: 0, last: 0, good: 0, bad: 0, refresh: 60, slowUntil: {}, from: 0 };
+    function resize(r) { r.resizeDrawingSurfaceToCanvas(dpr.levels[dpr.index]); }
+    function adapt(r, now) {
+      if (!dpr.from) dpr.from = now + 3000;
+      if (now < dpr.from) return;
+      const gap = now - dpr.last; dpr.last = now;
+      if (!dpr.since || gap > 250) { dpr.since = now; dpr.frames = 0; return; } // hidden or stalled: don't judge
+      dpr.frames++;
+      if (now - dpr.since < 500) return;
+      const fps = (dpr.frames * 1000) / (now - dpr.since);
+      dpr.refresh = Math.max(dpr.refresh, Math.min(fps, 240));
+      dpr.since = now; dpr.frames = 0;
+      const target = Math.min(dpr.refresh, 60);
+      if (fps >= target * 0.92) { dpr.good++; dpr.bad = 0; } else if (fps < target * 0.75) { dpr.bad++; dpr.good = 0; } else { dpr.good = dpr.bad = 0; }
+      if (dpr.bad >= 2 && dpr.index > 0) { dpr.slowUntil[dpr.index] = now + 30000; dpr.index--; dpr.good = dpr.bad = 0; resize(r); }
+      else if (dpr.good >= 4 && dpr.index + 1 < dpr.levels.length && !(dpr.slowUntil[dpr.index + 1] > now)) { dpr.index++; dpr.good = dpr.bad = 0; resize(r); }
+    }
+
+    // Downloads the file with progress (the first part of the bar).
+    async function download(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const total = +res.headers.get("Content-Length") || 0;
+      if (!res.body || !total) return res.arrayBuffer();
+      const reader = res.body.getReader();
+      const data = new Uint8Array(total);
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (got + value.length > data.length) return new Blob([data.subarray(0, got), value]).arrayBuffer(); // size was off
+        data.set(value, got);
+        got += value.length;
+        setProgress((got / total) * DOWNLOAD_SHARE);
+      }
+      return data.buffer.slice(0, got);
+    }
+
+    async function start() {
+      if (!document.createElement("canvas").getContext("webgl2")) {
+        fail("This handout needs WebGL 2. Try a recent Chrome, Edge, Firefox or Safari.");
+        return;
+      }
+      let buffer;
+      try {
+        buffer = await download(RIV);
+      } catch (e) {
+        console.error(e);
+        fail("Couldn't load the handout. Please refresh the page.");
+        return;
+      }
+      setProgress(DOWNLOAD_SHARE);
+      const r = new rive.Rive({
+        buffer, canvas, artboard: "MainStage", stateMachines: STATE_MACHINE,
+        autoplay: true, autoBind: true,
+        // the 3D models and backgrounds draw through script canvases: experimental
+        // in the web runtime, so switched on here
+        enableGPUCanvas: true,
+        layout: new rive.Layout({ fit: rive.Fit.contain, alignment: rive.Alignment.center }),
+        onLoad: () => wire(r),
+        onLoadError: (e) => { console.error(e); fail("Couldn't start the handout. Please refresh the page."); },
+      });
+      window.handout = r;
+      addEventListener("resize", () => resize(r));
+    }
+
+    function wire(r) {
+      resize(r);
+      const vm = r.viewModelInstance;
+      if (!vm) { loader.classList.add("done"); return; }
+      const ready = vm.boolean("stageReady");
+      const progress = vm.number("loadProgress");
+      const menuID = vm.number("menuID");
+      const letter = vm.viewModel("propertyOfLetter1");
+      const letterText = letter && letter.string("letterContents");
+
+      // Compose's position in the menu list (spacers take positions too)
+      let compose = -1;
+      try {
+        const list = vm.list("menuList");
+        for (let i = 0; i < list.length; i++) {
+          const title = list.instanceAt(i).string("title");
+          if (title && title.value === "Compose") compose = i;
+        }
+      } catch (e) { console.warn("menuList", e); }
+
+      letterInput.addEventListener("input", () => { if (letterText) letterText.value = letterInput.value; });
+
+      let loading = true;
+      (function frame(now) {
+        if (loading) {
+          setProgress(DOWNLOAD_SHARE + (progress ? progress.value : 1) * (1 - DOWNLOAD_SHARE));
+          if (!ready || ready.value) {
+            loading = false;
+            setProgress(1);
+            loader.classList.add("done");
+            setTimeout(() => (loader.style.display = "none"), 800);
+          }
+        }
+        const open = compose >= 0 && menuID && menuID.value === compose;
+        letterInput.style.display = open ? "block" : "none";
+        adapt(r, now);
+        requestAnimationFrame(frame);
+      })(performance.now());
+    }
+
+    start();
+  </script>
+</body>
+</html>
