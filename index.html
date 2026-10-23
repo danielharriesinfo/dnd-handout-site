@@ -97,26 +97,43 @@
       note.textContent = message;
     }
 
-    // Canvas resolution: starts at 1 pixel per CSS pixel and steps towards the
-    // screen's density (max 2) while frames keep up, back down when they don't,
-    // so a fast GPU gets a sharp picture and an integrated one stays smooth.
-    const dpr = { levels: [0.75, 1, 1.25, 1.5, 1.75, 2].filter((l) => l <= Math.max(1, Math.min(devicePixelRatio || 1, 2)) + 0.01),
-                  index: 1, frames: 0, since: 0, last: 0, good: 0, bad: 0, refresh: 60, slowUntil: {}, from: 0 };
+    // Canvas resolution: the screen's own density (max 2), as sharp as it
+    // looks locally. Only if the stage struggles (under SLOW_FPS for 3 s,
+    // judged from 5 s after the loading screen goes) does it step down a
+    // level, never below 1 pixel per CSS pixel; it steps back up once frames
+    // have headroom again (and not to a level that proved too slow in the last
+    // 30 s). ?dpr=1.5 etc. in the address fixes the level instead.
+    // (Daniel's Iris Xe laptop, 1.5x screen, full-width embed: 1.5x ~19 fps,
+    // 1.25x ~24, 1x ~28, so it settles at 1.25x.)
+    const SLOW_FPS = 22, FAST_FPS = 50;
+    const fixedDpr = parseFloat(new URLSearchParams(location.search).get("dpr")) || 0;
+    const screenDpr = Math.max(1, Math.min(devicePixelRatio || 1, 2));
+    const dpr = { levels: fixedDpr > 0 ? [fixedDpr] : [1, 1.25, 1.5, 1.75, 2].filter((l) => l <= screenDpr + 0.01),
+                  index: 0, frames: 0, since: 0, last: 0, good: 0, bad: 0, slowUntil: {}, from: 0 };
+    dpr.index = dpr.levels.length - 1;
+    window.handoutDpr = dpr; // for checking from the console
     function resize(r) { r.resizeDrawingSurfaceToCanvas(dpr.levels[dpr.index]); }
+    // A new level: the first frames after a resize are slow, so it settles
+    // 1.5 s before being judged.
+    function setLevel(r, index, now) {
+      dpr.index = index; dpr.good = dpr.bad = 0; dpr.since = 0; dpr.from = now + 1500;
+      resize(r);
+    }
+    // Frame rates are judged over 1.5 s windows (shorter ones are too noisy).
     function adapt(r, now) {
-      if (!dpr.from) dpr.from = now + 3000;
       if (now < dpr.from) return;
       const gap = now - dpr.last; dpr.last = now;
       if (!dpr.since || gap > 250) { dpr.since = now; dpr.frames = 0; return; } // hidden or stalled: don't judge
       dpr.frames++;
-      if (now - dpr.since < 500) return;
+      if (now - dpr.since < 1500) return;
       const fps = (dpr.frames * 1000) / (now - dpr.since);
-      dpr.refresh = Math.max(dpr.refresh, Math.min(fps, 240));
+      dpr.fps = Math.round(fps);
       dpr.since = now; dpr.frames = 0;
-      const target = Math.min(dpr.refresh, 60);
-      if (fps >= target * 0.92) { dpr.good++; dpr.bad = 0; } else if (fps < target * 0.75) { dpr.bad++; dpr.good = 0; } else { dpr.good = dpr.bad = 0; }
-      if (dpr.bad >= 2 && dpr.index > 0) { dpr.slowUntil[dpr.index] = now + 30000; dpr.index--; dpr.good = dpr.bad = 0; resize(r); }
-      else if (dpr.good >= 4 && dpr.index + 1 < dpr.levels.length && !(dpr.slowUntil[dpr.index + 1] > now)) { dpr.index++; dpr.good = dpr.bad = 0; resize(r); }
+      if (fixedDpr > 0) return; // measured, not changed
+      dpr.good = fps >= FAST_FPS ? dpr.good + 1 : 0;
+      dpr.bad = fps < SLOW_FPS ? dpr.bad + 1 : 0;
+      if (dpr.bad >= 2 && dpr.index > 0) { dpr.slowUntil[dpr.index] = now + 30000; setLevel(r, dpr.index - 1, now); }
+      else if (dpr.good >= 2 && dpr.index + 1 < dpr.levels.length && !(dpr.slowUntil[dpr.index + 1] > now)) setLevel(r, dpr.index + 1, now);
     }
 
     // Downloads the file with progress (the first part of the bar). The bytes
@@ -196,6 +213,7 @@
           setProgress(DOWNLOAD_SHARE + (progress ? progress.value : 1) * (1 - DOWNLOAD_SHARE));
           if (!ready || ready.value) {
             loading = false;
+            dpr.from = now + 5000; // the intro (the heaviest seconds) plays out first
             setProgress(1);
             loader.classList.add("done");
             setTimeout(() => (loader.style.display = "none"), 800);
@@ -203,7 +221,7 @@
         }
         const open = compose >= 0 && menuID && menuID.value === compose;
         letterInput.style.display = open ? "block" : "none";
-        adapt(r, now);
+        if (!loading) adapt(r, now);
         requestAnimationFrame(frame);
       })(performance.now());
     }
