@@ -9,7 +9,7 @@
 //    local test): the whole letter goes in the link, compressed, after #l=.
 //
 // Either way the letter is the same small object (a "payload"):
-//   { v: 1, text, font: 0-8, medium: 9-12, condition: 13-15,
+//   { v: 1, text, address, font: 0-8, medium: 9-12, condition: 13-15,
 //     additions: [16, 17, 19 that are on], signature: 21|22 }
 // using the menu's own numbers (docs/splits-board.md, "Shared numbers").
 (function () {
@@ -17,6 +17,7 @@
 
   const VERSION = 1;
   const MAX_TEXT = 5000;      // characters; the Velo backend checks the same
+  const MAX_ADDRESS = 300;    // the envelope's address, likewise
   const ADDITIONS = [16, 17, 19];
   const RANGES = { font: [0, 8, 2], medium: [9, 12, 9], condition: [13, 15, 13], signature: [21, 22, 21] }; // min, max, default
   const MSG_OUT = "dnd-handout";      // messages this page sends
@@ -36,6 +37,7 @@
     return {
       v: VERSION,
       text: p.text.slice(0, MAX_TEXT),
+      address: typeof p.address === "string" ? p.address.slice(0, MAX_ADDRESS) : "",
       font: whole(p.font, RANGES.font),
       medium: whole(p.medium, RANGES.medium),
       condition: whole(p.condition, RANGES.condition),
@@ -47,6 +49,11 @@
   // ---- reading and writing the stage's view model -------------------------
 
   function letterOf(vm) { return vm && vm.viewModel("propertyOfLetter1"); }
+
+  // The envelope's address (VMMainStage.address.addressText), or null.
+  function addressOf(vm) {
+    try { const a = vm.viewModel("address"); return a && a.string("addressText"); } catch (e) { return null; }
+  }
 
   function list(instance, name) {
     try { return instance.list(name); } catch (e) { return null; }
@@ -86,6 +93,7 @@
     return clean({
       v: VERSION,
       text: letter.string("letterContents").value,
+      address: (addressOf(vm) || { value: "" }).value,
       font: num("fontIndex"),
       medium: num("paperIndex"),
       condition: num("conditionIndex"),
@@ -102,6 +110,8 @@
     const letter = letterOf(vm);
     if (!letter || !(p = clean(p))) return false;
     letter.string("letterContents").value = p.text;
+    const address = addressOf(vm);
+    if (address && p.address) address.value = p.address; // older links have none: the envelope keeps its own
     letter.number("fontIndex").value = p.font;
     letter.number("conditionIndex").value = p.condition;
     letter.number("signatureIndex").value = p.signature;
