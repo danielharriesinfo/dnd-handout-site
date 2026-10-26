@@ -5,8 +5,11 @@
 //    page (Velo code, dev/share/velo/) to store the letter in the Letters
 //    collection; the link is the Wix page with ?l=<id>, and Velo sends the
 //    stored letter back into the iframe when someone opens it.
-//  - On its own (no Wix page around it, e.g. the GitHub Pages address or a
-//    local test): the whole letter goes in the link, compressed, after #l=.
+//  - On its own server (Cloudflare Pages, handout.danielharries.com: the
+//    functions in cloudflare/): the letter is stored there and the link is
+//    this page with ?l=<id>.
+//  - On its own with no server (e.g. the GitHub Pages address or a local
+//    test): the whole letter goes in the link, compressed, after #l=.
 //
 // Either way the letter is the same small object (a "payload"):
 //   { v: 1, text, address, font: 0-8, medium: 9-12, condition: 13-15,
@@ -233,6 +236,53 @@
     });
   }
 
+  // ---- this page's own server (cloudflare/functions/api/) ----------------
+  //
+  // Asks base + "health" whether it is there (on GitHub Pages it isn't), and
+  // if so stores and fetches letters at base + "letters".
+
+  function idInAddress() {
+    const id = new URLSearchParams(location.search).get("l");
+    return id && /^[A-Za-z0-9]{4,16}$/.test(id) ? id : null;
+  }
+
+  async function server(base) {
+    try {
+      const r = await fetch(base + "health", { cache: "no-store" });
+      if (!r.ok || !(await r.json()).ok) return null;
+    } catch (e) {
+      return null;
+    }
+    return {
+      canSave: true,
+      async save(payload) {
+        const r = await fetch(base + "letters", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(clean(payload)),
+        });
+        const answer = await r.json().catch(() => ({}));
+        if (!r.ok || !answer.id) throw new Error(answer.error || "couldn't save the letter");
+        const url = location.origin + location.pathname + "?l=" + answer.id;
+        return { url, copied: await copy(url) };
+      },
+      async load(id) {
+        try {
+          const r = await fetch(base + "letters/" + encodeURIComponent(id));
+          return r.ok ? clean(await r.json()) : null;
+        } catch (e) {
+          return null;
+        }
+      },
+      leave() { // "Write your own": the shared letter leaves the address
+        const u = new URL(location.href);
+        if (!u.searchParams.has("l")) return;
+        u.searchParams.delete("l");
+        history.replaceState(null, "", u);
+      },
+    };
+  }
+
   // ---- copying ------------------------------------------------------------
 
   async function copy(text) {
@@ -244,5 +294,5 @@
     }
   }
 
-  window.HandoutShare = { VERSION, MAX_TEXT, STATE, clean, read, apply, shareButton, toCode, fromCode, codeInAddress, inlineLink, connect, copy };
+  window.HandoutShare = { VERSION, MAX_TEXT, STATE, clean, read, apply, shareButton, toCode, fromCode, codeInAddress, idInAddress, inlineLink, connect, server, copy };
 })();

@@ -49,6 +49,16 @@
   .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
              clip: rect(0 0 0 0); white-space: pre-wrap; border: 0; }
 
+  /* A shared letter arrives folded and opens with a click on the model; this
+     does the same from the keyboard (or a screen reader). Hidden until it has
+     the focus, then it sits where the share card's buttons are. */
+  #openLetter:not(:focus) { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+                            overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+  #openLetter:focus { position: absolute; left: calc(120 / 1920 * 100%); top: calc(475 / 1200 * 100%);
+                      width: calc(360 / 1920 * 100%); height: calc(90 / 1200 * 100%);
+                      font: 1.15cqw "Aldrich", system-ui, sans-serif; letter-spacing: 0.2em; color: var(--label);
+                      background: var(--track); border: 1.5px solid var(--gold); border-radius: 0.4cqw; }
+
   /* After Share: the link, to copy by hand if the browser blocked copying.
      Sits under the menu (artboard x 60-540, above y 1140). */
   #shareBox { position: absolute; left: calc(60 / 1920 * 100%); bottom: calc(60 / 1200 * 100%);
@@ -95,6 +105,7 @@
     <canvas id="canvas" role="img" aria-label="A letter on the desk"></canvas>
     <textarea id="letterInput" placeholder="Write your letter…" aria-label="Your letter"></textarea>
     <textarea id="addressInput" maxlength="90" rows="4" placeholder="To whom, and where…" aria-label="The address"></textarea>
+    <button type="button" id="openLetter" hidden>OPEN THE LETTER</button>
     <article id="letterText" class="sr-only" aria-label="The letter" hidden></article>
     <div id="shareBox" role="dialog" aria-label="Link to your letter">
       <span class="message" aria-live="polite"></span>
@@ -117,7 +128,7 @@
   <script>
     const PARAMS = new URLSearchParams(location.search);
     const RIV = "dnd-quill.riv";
-    const RIV_BYTES = 15401051; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
+    const RIV_BYTES = 15431530; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
     const STATE_MACHINE = "State Machine 1";
     const DOWNLOAD_SHARE = 0.6; // of the bar: downloading the file, then the stage warming up
     const PARENT_WAIT = 2500; // ms to wait for a Wix page to answer before going it alone
@@ -258,13 +269,15 @@
     }
 
     // ---- share links ------------------------------------------------------
-    // site: the Wix page around this one (null when there isn't one).
+    // site: where letters are stored: the Wix page around this one, else this
+    // page's own server (Cloudflare), else none (links carry the letter).
     // incoming: the shared letter this page was opened with, or null.
     const share = { site: null, incoming: null };
     const shareReady = (async () => {
-      share.site = await S.connect(PARENT_WAIT);
-      const code = S.codeInAddress();
+      share.site = (await S.connect(PARENT_WAIT)) || (await S.server("api/"));
+      const code = S.codeInAddress(), id = S.idInAddress();
       if (code) share.incoming = await S.fromCode(code);
+      else if (share.site && share.site.load) share.incoming = id ? await share.site.load(id) : null;
       else if (share.site) share.incoming = await share.site.letter;
       window.handoutShare = share; // for checking from the console
     })();
@@ -297,18 +310,36 @@
       addEventListener("resize", () => resize(r));
     }
 
-    // Shows a shared letter: on the stage (Share View, paper open) and as
-    // real text for screen readers.
+    // Shows a shared letter in the Share View. With the Deliver flags
+    // (arriveFolded, letterOpened) it arrives folded and the reader opens it,
+    // by clicking the model or with #openLetter; the real-text copy for screen
+    // readers waits for that too (showOpened). Older builds without them open
+    // the paper straight away.
+    const openLetter = document.getElementById("openLetter");
     function openShared(vm, payload) {
       if (!S.apply(vm, payload)) return false;
       const flag = vm.boolean("shareView");
       if (flag) flag.value = true;
-      const open = vm.boolean("paperOpen");
-      if (open) open.value = true;
       letterText.textContent = payload.text;
-      letterText.hidden = false;
-      canvas.setAttribute("aria-label", "A letter on the desk. Its text follows.");
+      const folded = vm.boolean("arriveFolded"), opened = vm.boolean("letterOpened");
+      if (folded && opened) {
+        folded.value = true;
+        openLetter.hidden = false;
+        openLetter.onclick = () => { opened.value = true; };
+        canvas.setAttribute("aria-label", "A folded letter on the desk. Open it to read it.");
+      } else {
+        const open = vm.boolean("paperOpen");
+        if (open) open.value = true;
+        showOpened();
+      }
       return true;
+    }
+    function showOpened() {
+      if (document.activeElement === openLetter) letterText.focus();
+      openLetter.hidden = true;
+      letterText.hidden = false;
+      letterText.tabIndex = -1;
+      canvas.setAttribute("aria-label", "A letter on the desk. Its text follows.");
     }
 
     // "Write your own": the stage has left the Share View; start a fresh letter
@@ -319,6 +350,7 @@
       letterInput.value = "";
       letterText.hidden = true;
       letterText.textContent = "";
+      openLetter.hidden = true;
       canvas.setAttribute("aria-label", "A letter on the desk");
       if (S.codeInAddress()) history.replaceState(null, "", location.href.split("#")[0]);
       if (share.site) share.site.leave();
@@ -379,6 +411,7 @@
       const progress = vm.number("loadProgress");
       const menuID = vm.number("menuID");
       const shareView = vm.boolean("shareView");
+      const letterOpened = vm.boolean("letterOpened");
       const letter = vm.viewModel("propertyOfLetter1");
       const letterString = letter && letter.string("letterContents");
       const button = S.shareButton(vm);
@@ -399,7 +432,8 @@
       const showAddressField = addressBinding(vm);
 
       let inShare = share.incoming ? openShared(vm, share.incoming) : false;
-      if (S.codeInAddress() && !share.incoming) note.textContent = "That link's letter couldn't be read.";
+      if ((S.codeInAddress() || (share.site && share.site.load && S.idInAddress())) && !share.incoming)
+        note.textContent = "That link's letter couldn't be read.";
 
       let loading = true;
       (function frame(now) {
@@ -414,6 +448,7 @@
           }
         }
         if (inShare && shareView && !shareView.value) { inShare = false; leaveShared(vm); }
+        if (inShare && letterText.hidden && letterOpened && letterOpened.value) showOpened();
         if (requested && requested.value) { requested.value = false; shareLetter(vm, button); }
         showField(!inShare && compose >= 0 && menuID && menuID.value === compose, now);
         showAddressField(now, !inShare);
