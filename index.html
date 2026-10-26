@@ -11,7 +11,10 @@
   /* The public page: the stage (MainStage, 1920 x 1200) as large as fits,
      an HTML loading screen over it while the file downloads and the stage
      warms up, and the letter's text box over the Compose panel. Made to sit
-     in an iframe (Wix's "Embed a site") as well as on its own. */
+     in an iframe (Wix's "Embed a site") as well as on its own.
+     Share links (share-links.js): opens a shared letter in the Share View,
+     keeps a real-text copy of it for screen readers, and turns the Share
+     button into a link; dev/share/README.md has the design. */
   :root { --bg: #0d0b0a; --gold: #f2c46e; --label: #d9c7a3; --track: #1e2229; --rim: #8a6a3a; }
   html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
   body { display: grid; place-items: center; }
@@ -23,6 +26,7 @@
   /* Compose's writing panel: artboard x 85-514, y 318-605, the box inset 12 */
   #letterInput {
     position: absolute; display: none; box-sizing: border-box; resize: none;
+    opacity: 0; transition: opacity 0.15s ease-out;
     left: calc(97 / 1920 * 100%); top: calc(330 / 1200 * 100%);
     width: calc(405 / 1920 * 100%); height: calc(263 / 1200 * 100%);
     padding: 0.6cqw; border: 0; outline: 0; background: transparent;
@@ -30,6 +34,24 @@
     font: 1.05cqw/1.45 "Aldrich", system-ui, sans-serif; letter-spacing: 0.04em;
   }
   #letterInput::placeholder { color: #8d8270; }
+
+  /* The letter as real text, for screen readers (the stage's own text panel
+     is drawn, so they can't read it), text search and translation. */
+  .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+             clip: rect(0 0 0 0); white-space: pre-wrap; border: 0; }
+
+  /* After Share: the link, to copy by hand if the browser blocked copying.
+     Sits under the menu (artboard x 60-540, above y 1140). */
+  #shareBox { position: absolute; left: calc(60 / 1920 * 100%); bottom: calc(60 / 1200 * 100%);
+              width: calc(480 / 1920 * 100%); display: none; box-sizing: border-box; padding: 0.7cqw;
+              background: #1e2229ee; border: 1.5px solid #ff991f80; border-radius: 0.4cqw;
+              font: 0.8cqw "Aldrich", system-ui, sans-serif; letter-spacing: 0.05em; color: var(--label); }
+  #shareBox.open { display: grid; gap: 0.5cqw; }
+  #shareBox input { width: 100%; box-sizing: border-box; font: inherit; color: #e9dfc9;
+                    background: var(--bg); border: 1px solid var(--rim); padding: 0.35cqw; }
+  #shareBox .row { display: flex; gap: 0.5cqw; justify-content: flex-end; }
+  #shareBox button { font: inherit; letter-spacing: 0.1em; color: var(--label); background: var(--bg);
+                     border: 1px solid var(--rim); padding: 0.3cqw 0.8cqw; cursor: pointer; }
 
   /* The loading screen: the same look as the one in the file (which sits
      under this and fades with it), with motion the browser keeps running
@@ -61,8 +83,14 @@
 </head>
 <body>
   <div id="stage">
-    <canvas id="canvas"></canvas>
+    <canvas id="canvas" role="img" aria-label="A letter on the desk"></canvas>
     <textarea id="letterInput" placeholder="Write your letter…" aria-label="Your letter"></textarea>
+    <article id="letterText" class="sr-only" aria-label="The letter" hidden></article>
+    <div id="shareBox" role="dialog" aria-label="Link to your letter">
+      <span class="message" aria-live="polite"></span>
+      <input type="text" readonly aria-label="Link" />
+      <div class="row"><button type="button" class="copy">COPY</button><button type="button" class="close">CLOSE</button></div>
+    </div>
   </div>
 
   <div id="loader" role="status" aria-live="polite">
@@ -75,17 +103,33 @@
   </div>
 
   <script src="https://unpkg.com/@rive-app/webgl2@2.43.1"></script>
+  <script src="share-links.js"></script>
   <script>
+    const PARAMS = new URLSearchParams(location.search);
     const RIV = "dnd-quill.riv";
-    const RIV_BYTES = 10248711; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
+    const RIV_BYTES = 15339922; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
     const STATE_MACHINE = "State Machine 1";
     const DOWNLOAD_SHARE = 0.6; // of the bar: downloading the file, then the stage warming up
+    const PARENT_WAIT = 2500; // ms to wait for a Wix page to answer before going it alone
 
     const canvas = document.getElementById("canvas");
     const letterInput = document.getElementById("letterInput");
+    const letterText = document.getElementById("letterText");
+    // Compose's writing field waits until the panel's background has opened (Menu1's
+    // 200 ms blend), coming in a touch before it settles, then fades in; it hides at once.
+    const FIELD_DELAY_MS = 250;
+    let composeSince = null;
+    function showField(open, now) {
+      if (!open) composeSince = null;
+      else if (composeSince === null) composeSince = now;
+      const shown = open && now - composeSince >= FIELD_DELAY_MS;
+      letterInput.style.display = shown ? "block" : "none";
+      letterInput.style.opacity = shown && now - composeSince >= FIELD_DELAY_MS + 20 ? "1" : "0";
+    }
     const loader = document.getElementById("loader");
     const fill = loader.querySelector(".fill");
     const note = loader.querySelector(".note");
+    const S = window.HandoutShare;
 
     let shown = 0;
     function setProgress(p) {
@@ -106,7 +150,7 @@
     // (Daniel's Iris Xe laptop, 1.5x screen, full-width embed: 1.5x ~19 fps,
     // 1.25x ~24, 1x ~28, so it settles at 1.25x.)
     const SLOW_FPS = 22, FAST_FPS = 50;
-    const fixedDpr = parseFloat(new URLSearchParams(location.search).get("dpr")) || 0;
+    const fixedDpr = parseFloat(PARAMS.get("dpr")) || 0;
     const screenDpr = Math.max(1, Math.min(devicePixelRatio || 1, 2));
     const dpr = { levels: fixedDpr > 0 ? [fixedDpr] : [1, 1.25, 1.5, 1.75, 2].filter((l) => l <= screenDpr + 0.01),
                   index: 0, frames: 0, since: 0, last: 0, good: 0, bad: 0, slowUntil: {}, from: 0 };
@@ -157,6 +201,18 @@
       return new Blob(chunks).arrayBuffer();
     }
 
+    // ---- share links ------------------------------------------------------
+    // site: the Wix page around this one (null when there isn't one).
+    // incoming: the shared letter this page was opened with, or null.
+    const share = { site: null, incoming: null };
+    const shareReady = (async () => {
+      share.site = await S.connect(PARENT_WAIT);
+      const code = S.codeInAddress();
+      if (code) share.incoming = await S.fromCode(code);
+      else if (share.site) share.incoming = await share.site.letter;
+      window.handoutShare = share; // for checking from the console
+    })();
+
     async function start() {
       if (!document.createElement("canvas").getContext("webgl2")) {
         fail("This handout needs WebGL 2. Try a recent Chrome, Edge, Firefox or Safari.");
@@ -164,7 +220,7 @@
       }
       let buffer;
       try {
-        buffer = await download(RIV);
+        [buffer] = await Promise.all([download(RIV), shareReady]);
       } catch (e) {
         console.error(e);
         fail("Couldn't load the handout. Please refresh the page.");
@@ -185,6 +241,74 @@
       addEventListener("resize", () => resize(r));
     }
 
+    // Shows a shared letter: on the stage (Share View, paper open) and as
+    // real text for screen readers.
+    function openShared(vm, payload) {
+      if (!S.apply(vm, payload)) return false;
+      const flag = vm.boolean("shareView");
+      if (flag) flag.value = true;
+      const open = vm.boolean("paperOpen");
+      if (open) open.value = true;
+      letterText.textContent = payload.text;
+      letterText.hidden = false;
+      canvas.setAttribute("aria-label", "A letter on the desk. Its text follows.");
+      return true;
+    }
+
+    // "Write your own": the stage has left the Share View; start a fresh letter
+    // in the same style, and drop the shared letter from the address.
+    function leaveShared(vm) {
+      const letter = vm.viewModel("propertyOfLetter1");
+      if (letter) letter.string("letterContents").value = "";
+      letterInput.value = "";
+      letterText.hidden = true;
+      letterText.textContent = "";
+      canvas.setAttribute("aria-label", "A letter on the desk");
+      if (S.codeInAddress()) history.replaceState(null, "", location.href.split("#")[0]);
+      if (share.site) share.site.leave();
+    }
+
+    // The Share button: store the letter (Wix) or pack it into the link (on
+    // its own), copy the link, and say how it went on the button.
+    const shareBox = document.getElementById("shareBox");
+    const shareInput = shareBox.querySelector("input");
+    shareBox.querySelector(".close").addEventListener("click", () => shareBox.classList.remove("open"));
+    shareBox.querySelector(".copy").addEventListener("click", async () => {
+      shareInput.select();
+      shareBox.querySelector(".message").textContent = (await S.copy(shareInput.value)) ? "Copied." : "Select the link and copy it.";
+    });
+    function showLink(url, message) {
+      shareInput.value = url;
+      shareBox.querySelector(".message").textContent = message;
+      shareBox.classList.add("open");
+    }
+
+    let sharing = false;
+    async function shareLetter(vm, button) {
+      if (sharing) return;
+      sharing = true;
+      const state = button.number("shareState");
+      const set = (s) => { if (state) state.value = s; };
+      set(S.STATE.saving);
+      try {
+        const payload = S.read(vm);
+        if (!payload) throw new Error("no letter on the stage");
+        let url, copied;
+        if (share.site && share.site.canSave) {
+          ({ url, copied } = await share.site.save(payload));
+        } else {
+          url = S.inlineLink(await S.toCode(payload));
+          copied = await S.copy(url);
+        }
+        set(copied ? S.STATE.copied : S.STATE.shown);
+        showLink(url, copied ? "Link copied. Anyone with it can read this letter." : "Copy this link to share your letter.");
+      } catch (e) {
+        console.error("share", e);
+        set(S.STATE.failed);
+      }
+      setTimeout(() => { set(S.STATE.idle); sharing = false; }, 3500);
+    }
+
     function wire(r) {
       resize(r);
       const vm = r.viewModelInstance;
@@ -192,8 +316,12 @@
       const ready = vm.boolean("stageReady");
       const progress = vm.number("loadProgress");
       const menuID = vm.number("menuID");
+      const shareView = vm.boolean("shareView");
       const letter = vm.viewModel("propertyOfLetter1");
-      const letterText = letter && letter.string("letterContents");
+      const letterString = letter && letter.string("letterContents");
+      const button = S.shareButton(vm);
+      const requested = button && button.boolean("shareRequested");
+      if (!shareView || !button) console.warn("this .riv has no share view (shareView, Share button)");
 
       // Compose's position in the menu list (spacers take positions too)
       let compose = -1;
@@ -205,7 +333,10 @@
         }
       } catch (e) { console.warn("menuList", e); }
 
-      letterInput.addEventListener("input", () => { if (letterText) letterText.value = letterInput.value; });
+      letterInput.addEventListener("input", () => { if (letterString) letterString.value = letterInput.value; });
+
+      let inShare = share.incoming ? openShared(vm, share.incoming) : false;
+      if (S.codeInAddress() && !share.incoming) note.textContent = "That link's letter couldn't be read.";
 
       let loading = true;
       (function frame(now) {
@@ -219,8 +350,9 @@
             setTimeout(() => (loader.style.display = "none"), 800);
           }
         }
-        const open = compose >= 0 && menuID && menuID.value === compose;
-        letterInput.style.display = open ? "block" : "none";
+        if (inShare && shareView && !shareView.value) { inShare = false; leaveShared(vm); }
+        if (requested && requested.value) { requested.value = false; shareLetter(vm, button); }
+        showField(!inShare && compose >= 0 && menuID && menuID.value === compose, now);
         if (!loading) adapt(r, now);
         requestAnimationFrame(frame);
       })(performance.now());
