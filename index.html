@@ -103,7 +103,7 @@
 <body>
   <div id="stage">
     <canvas id="canvas" role="img" aria-label="A letter on the desk"></canvas>
-    <textarea id="letterInput" placeholder="Write your letter…" aria-label="Your letter"></textarea>
+    <textarea id="letterInput" maxlength="1000" placeholder="Write your letter…" aria-label="Your letter"></textarea>
     <textarea id="addressInput" maxlength="90" rows="4" placeholder="To whom, and where…" aria-label="The address"></textarea>
     <button type="button" id="openLetter" hidden>OPEN THE LETTER</button>
     <article id="letterText" class="sr-only" aria-label="The letter" hidden></article>
@@ -123,12 +123,12 @@
     </div>
   </div>
 
-  <script src="https://unpkg.com/@rive-app/webgl2@2.43.1"></script>
+  <script src="https://unpkg.com/@rive-app/webgl2@2.47.1"></script>
   <script src="share-links.js"></script>
   <script>
     const PARAMS = new URLSearchParams(location.search);
     const RIV = "dnd-quill.riv";
-    const RIV_BYTES = 15431530; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
+    const RIV_BYTES = 15473819; // its size, for the bar (hosts may send it compressed); set by tools/publish_site.sh
     const STATE_MACHINE = "State Machine 1";
     const DOWNLOAD_SHARE = 0.6; // of the bar: downloading the file, then the stage warming up
     const PARENT_WAIT = 2500; // ms to wait for a Wix page to answer before going it alone
